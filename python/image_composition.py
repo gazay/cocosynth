@@ -9,6 +9,7 @@ from datetime import datetime
 from pathlib import Path
 from tqdm import tqdm
 from PIL import Image, ImageEnhance
+import albumentations as A
 
 class MaskJsonUtils():
     """ Creates a JSON definition file for image masks.
@@ -126,6 +127,21 @@ class ImageComposition():
              (121, 86, 219), (141, 86, 219), (160, 86, 219), (180, 86, 219),
              (200, 86, 219), (219, 86, 217), (219, 86, 198), (219, 86, 178),
              (219, 86, 158), (219, 86, 138), (219, 86, 118), (219, 86, 98)]
+        self.augs = A.Compose([
+            A.RandomBrightnessContrast(),
+            A.RandomRotate90(),
+            A.ShiftScaleRotate(rotate_limit=10, border_mode=0, value=0),
+            A.CLAHE(),
+            A.CoarseDropout(),
+            A.ColorJitter(),
+            A.Downscale(scale_min=0.8, scale_max=0.8),
+            A.Equalize(),
+            A.Perspective(),
+            A.OpticalDistortion(),
+            A.RandomToneCurve(),
+        ],
+        additional_targets={"r": "image", "g": "image", "b": "image", "a": "image"}
+        )
         assert len(self.mask_colors) >= self.max_foregrounds, 'length of mask_colors should be >= max_foregrounds'
 
     def _validate_and_process_args(self, args):
@@ -287,6 +303,7 @@ class ImageComposition():
                 # Compose foregrounds and background
                 composite, mask = self._compose_images(foregrounds, background_path)
             except Exception as err:
+                # raise err
                 print(err)
                 continue
 
@@ -439,9 +456,19 @@ class ImageComposition():
         fg_image = fg_image.resize(new_size, resample=Image.BICUBIC)
 
         # Adjust foreground brightness
-        brightness_factor = random.random() * .4 + .7 # Pick something between .7 and 1.1
-        enhancer = ImageEnhance.Brightness(fg_image)
-        fg_image = enhancer.enhance(brightness_factor)
+        # brightness_factor = random.random() * .4 + .7 # Pick something between .7 and 1.1
+        # enhancer = ImageEnhance.Brightness(fg_image)
+        # fg_image = enhancer.enhance(brightness_factor)
+
+        a_fg_image = np.array(fg_image)
+        alpha = a_fg_image[:, :, 3]
+        a_fg_image = a_fg_image[:, :, :3]
+        tfms = self.augs(image=a_fg_image, a=alpha)
+        a_fg_image, alpha = tfms["image"], tfms["a"]
+        alpha = np.expand_dims(alpha, -1)
+        a_fg_image = np.concatenate([a_fg_image, alpha], axis=2)
+
+        fg_image = Image.fromarray(a_fg_image)
 
         # Add any other transformations here...
 
