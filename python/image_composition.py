@@ -4,6 +4,7 @@ import json
 import warnings
 import random
 import numpy as np
+from glob import glob
 from datetime import datetime
 from pathlib import Path
 from tqdm import tqdm
@@ -114,8 +115,17 @@ class ImageComposition():
         self.allowed_output_types = ['.png', '.jpg', '.jpeg']
         self.allowed_background_types = ['.png', '.jpg', '.jpeg']
         self.zero_padding = 8 # 00000027.png, supports up to 100 million images
-        self.max_foregrounds = 3
-        self.mask_colors = [(255, 0, 0), (0, 255, 0), (0, 0, 255)]
+        self.max_foregrounds = 40
+        self.mask_colors = [(219, 94, 86), (219, 114, 86), (219, 134, 86), (219, 154, 86),
+             (219, 174, 86), (219, 194, 86), (219, 213, 86), (204, 219, 86),
+             (184, 219, 86), (164, 219, 86), (145, 219, 86), (125, 219, 86),
+             (105, 219, 86), (86, 219, 88), (86, 219, 107), (86, 219, 127),
+             (86, 219, 147), (86, 219, 167), (86, 219, 187), (86, 219, 207),
+             (86, 211, 219), (86, 191, 219), (86, 171, 219), (86, 151, 219),
+             (86, 131, 219), (86, 111, 219), (86, 92, 219), (101, 86, 219),
+             (121, 86, 219), (141, 86, 219), (160, 86, 219), (180, 86, 219),
+             (200, 86, 219), (219, 86, 217), (219, 86, 198), (219, 86, 178),
+             (219, 86, 158), (219, 86, 138), (219, 86, 118), (219, 86, 98)]
         assert len(self.mask_colors) >= self.max_foregrounds, 'length of mask_colors should be >= max_foregrounds'
 
     def _validate_and_process_args(self, args):
@@ -137,7 +147,7 @@ class ImageComposition():
 
         # Validate and process the output type
         if args.output_type is None:
-            self.output_type = '.jpg' # default
+            self.output_type = '.png' # default
         else:
             if args.output_type[0] != '.':
                 self.output_type = f'.{args.output_type}'
@@ -273,8 +283,12 @@ class ImageComposition():
                     'mask_rgb_color':mask_rgb_color
                 })
 
-            # Compose foregrounds and background
-            composite, mask = self._compose_images(foregrounds, background_path)
+            try:
+                # Compose foregrounds and background
+                composite, mask = self._compose_images(foregrounds, background_path)
+            except Exception as err:
+                print(err)
+                continue
 
             # Create the file name (used for both composite and mask)
             save_filename = f'{i:0{self.zero_padding}}' # e.g. 00000023.jpg
@@ -299,7 +313,7 @@ class ImageComposition():
                         'category':fg['category'],
                         'super_category':fg['super_category']
                     }
-            
+
             # Add the mask to MaskJsonUtils
             mju.add_mask(
                 composite_path.relative_to(self.output_dir).as_posix(),
@@ -332,6 +346,7 @@ class ImageComposition():
 
         # Crop background to desired size (self.width x self.height), randomly positioned
         bg_width, bg_height = background.size
+        min_side = min(bg_width, bg_height)
         max_crop_x_pos = bg_width - self.width
         max_crop_y_pos = bg_height - self.height
         assert max_crop_x_pos >= 0, f'desired width, {self.width}, is greater than background width, {bg_width}, for {str(background_path)}'
@@ -341,18 +356,38 @@ class ImageComposition():
         composite = background.crop((crop_x_pos, crop_y_pos, crop_x_pos + self.width, crop_y_pos + self.height))
         composite_mask = Image.new('RGB', composite.size, 0)
 
-        for fg in foregrounds:
+        for fg_id, fg in enumerate(foregrounds):
             fg_path = fg['foreground_path']
 
             # Perform transformations
-            fg_image = self._transform_foreground(fg, fg_path)
+            fg_image = self._transform_foreground(fg, fg_path, min_side)
 
             # Choose a random x,y position for the foreground
             max_x_position = composite.size[0] - fg_image.size[0]
             max_y_position = composite.size[1] - fg_image.size[1]
             assert max_x_position >= 0 and max_y_position >= 0, \
             f'foreground {fg_path} is too big ({fg_image.size[0]}x{fg_image.size[1]}) for the requested output size ({self.width}x{self.height}), check your input parameters'
-            paste_position = (random.randint(0, max_x_position), random.randint(0, max_y_position))
+
+            paste_position = None
+            if random.random() > 0.95:
+                # Can cover other objects
+                paste_position = (random.randint(0, max_x_position), random.randint(0, max_y_position))
+            else:
+                # Will position object only on free space
+                _mask = np.array(composite_mask)
+                #if fg_id > 20:
+                #    import ipdb
+                #    ipdb.set_trace()
+                for i in range(100):
+                    x, y = (random.randint(0, max_x_position), random.randint(0, max_y_position))
+                    w, h = fg_image.size
+                    if not (_mask[y:y+h, x:x+w] > 0).any():
+                        paste_position = (x, y)
+                        break
+
+            if paste_position is None:
+                print("Couldn't find good position for object")
+                continue
 
             # Create a new foreground image as large as the composite and paste it on top
             new_fg_image = Image.new('RGBA', composite.size, color = (0, 0, 0, 0))
@@ -382,11 +417,16 @@ class ImageComposition():
 
         return composite, composite_mask
 
-    def _transform_foreground(self, fg, fg_path):
+    def _transform_foreground(self, fg, fg_path, min_bg_side):
         # Open foreground and get the alpha channel
         fg_image = Image.open(fg_path)
         fg_alpha = np.array(fg_image.getchannel(3))
         assert np.any(fg_alpha == 0), f'foreground needs to have some transparency: {str(fg_path)}'
+
+        w, h = fg_image.size
+        max_side = max(w, h)
+        max_scale = (min_bg_side/2) / max_side
+        min_scale = max_scale / 20
 
         # ** Apply Transformations **
         # Rotate the foreground
@@ -394,7 +434,7 @@ class ImageComposition():
         fg_image = fg_image.rotate(angle_degrees, resample=Image.BICUBIC, expand=True)
 
         # Scale the foreground
-        scale = random.random() * .5 + .5 # Pick something between .5 and 1
+        scale = random.uniform(min_scale, max_scale)
         new_size = (int(fg_image.size[0] * scale), int(fg_image.size[1] * scale))
         fg_image = fg_image.resize(new_size, resample=Image.BICUBIC)
 
